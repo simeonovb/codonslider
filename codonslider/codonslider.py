@@ -1,38 +1,165 @@
-from Bio import SeqIO
-from datetime import datetime
+"""Sliding window search for stretches of one codon in coding sequences."""
+from __future__ import annotations
+
+import logging
+from collections import defaultdict
+from collections.abc import Iterable
+
+import numpy as np
 import pandas as pd
-from .sources import input_file, gene_info
+from Bio import SeqIO
 
-def slidwin(elements, current_window_size, step, codon, max_window_size, identifier):
-    # Window size and step are given in codons, the sequence is sliced in nucleotides
-    window_length = current_window_size * 3
-    if len(elements) <= window_length:
-        return {'Window_Size': current_window_size, 'Codon_Frequency': 0, 'Sequence': elements}
+from .sources import gene_info, input_file
 
-    max_window_size = min(max_window_size, len(elements) // 3)  # Ensure the maximum window size is within the sequence length
-    max_codon_freq = 0  # Track the maximum codon frequency across all records for the current window size
-    sequence_with_max_codon_freq = ''
+logger = logging.getLogger(__name__)
 
-    for a in range(0, len(elements) - window_length + 1, step * 3):
-        win = elements[a:a + window_length]
-
-        # Count the codon of interest in the current window
-        codons = [win[b:b + 3] for b in range(0, len(win), 3)]
-        codon_freq = codons.count(codon) / current_window_size
-
-        # Update the maximum codon frequency information if needed
-        if codon_freq >= max_codon_freq:
-            max_codon_freq = codon_freq
-            sequence_with_max_codon_freq = win
-
-    return {'Window_Size': current_window_size, 'Codon_Frequency': max_codon_freq, 'Sequence': sequence_with_max_codon_freq, 'Gene': identifier}
+COLUMNS = ['Window_Size', 'Codon_Frequency', 'Sequence', 'Gene', 'Gene_Symbol', 'Gene_ID']
+NUCLEOTIDES = set('ACGT')
 
 
-def maxslider(path_to_file=None, steps=1, codon_of_interest=None, initial_window_size=1, max_window_size=None,
-              *, source=None, species='human', genes=None, assembly=None, cache_dir=None, cache=True):
+def _check_codon(codon):
+    """Returns the codon in upper case DNA letters ('aga' and 'AGA' both give 'AGA', 'AGU' gives 'AGT')."""
+    if not isinstance(codon, str):
+        raise TypeError(f"The codon must be a string such as 'AGA', not {codon!r}.")
+    normalized = codon.strip().upper().replace('U', 'T')
+    if len(normalized) != 3 or not set(normalized) <= NUCLEOTIDES:
+        raise ValueError(f"'{codon}' is not a codon. Use three of the letters A, C, G and T (or U).")
+    return normalized
+
+
+def _check_positive(name, value):
+    if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or value < 1:
+        raise ValueError(f"{name} must be a whole number of at least 1, not {value!r}.")
+
+
+def _codon_counts(sequence, codon):
     """
-    Reads a FASTA file, iterates through sequence records, and applies the
-    sliding window analysis (slidwin) for a range of window sizes.
+    Cumulative count of the codon in the reading frame of the sequence: counts[i] is the number of times
+    it occurs in the first i codons, so a window of codons [a, b) contains counts[b] - counts[a] of them.
+    """
+    n_codons = len(sequence) // 3
+    codons = np.frombuffer(sequence[:n_codons * 3].encode('ascii'), dtype='S3')
+    counts = np.zeros(n_codons + 1, dtype=np.int64)
+    np.cumsum(codons == codon.encode('ascii'), out=counts[1:])
+    return counts
+
+
+def _densest_window(sequence, counts, window_size, step):
+    """
+    Returns (frequency, window sequence) of the densest window, the last one if several are equally dense.
+    A sequence shorter than the window gives (0.0, '').
+    """
+    n_codons = len(counts) - 1
+    if n_codons < window_size:
+        return 0.0, ''
+    # Number of codons of interest in the windows starting at codon 0, step, 2 * step, ...
+    per_window = counts[window_size::step] - counts[:n_codons - window_size + 1:step]
+    best = len(per_window) - 1 - int(np.argmax(per_window[::-1]))
+    start = best * step * 3
+    return int(per_window[best]) / window_size, sequence[start:start + window_size * 3]
+
+
+def slidwin(sequence: str, window_size: int, step: int, codon: str, identifier: str | None = None) -> dict:
+    """
+    Slides a window over one coding sequence and finds the window with the highest frequency of the codon.
+    Only codons in the reading frame of the sequence are counted.
+
+    Args:
+        sequence (str): The coding sequence, starting with its first codon.
+        window_size (int): The size of the window, in codons.
+        step (int): How many codons the window moves per slide.
+        codon (str): The codon to count (e.g. 'AGA').
+        identifier (str): Name of the sequence, copied to the result.
+
+    Returns:
+        dict: Window_Size, Codon_Frequency (the fraction of the codons in the window that are the codon of
+        interest), Sequence (the densest window, the last one if several are equally dense) and Gene (identifier).
+        A sequence shorter than the window has a frequency of 0 and an empty Sequence.
+    """
+    codon = _check_codon(codon)
+    _check_positive('window_size', window_size)
+    _check_positive('step', step)
+    sequence = sequence.upper()
+    frequency, window = _densest_window(sequence, _codon_counts(sequence, codon), window_size, step)
+    return {'Window_Size': window_size, 'Codon_Frequency': frequency, 'Sequence': window, 'Gene': identifier}
+
+
+def _scan(path_to_file, codon, step, window_sizes):
+    """
+    Reads the FASTA file once and yields the densest window of every sequence for every window size.
+    Window sizes larger than a sequence are skipped for that sequence.
+    """
+    with open(path_to_file) as handle:
+        for record in SeqIO.parse(handle, 'fasta'):
+            sequence = str(record.seq).upper()
+            counts = _codon_counts(sequence, codon)
+            symbol, gene_id = gene_info(record.description)
+            for window_size in window_sizes:
+                if window_size > len(counts) - 1:
+                    break
+                frequency, window = _densest_window(sequence, counts, window_size, step)
+                yield {'Window_Size': window_size, 'Codon_Frequency': frequency, 'Sequence': window,
+                       'Gene': record.id, 'Gene_Symbol': symbol, 'Gene_ID': gene_id}
+
+
+def _densest_per_window_size(windows: Iterable[dict]) -> dict[int, list[dict]]:
+    """maxslider: keeps the densest window across all sequences per window size (the last one if tied)."""
+    densest = {}
+    for window in windows:
+        current = densest.get(window['Window_Size'])
+        if current is None or window['Codon_Frequency'] >= current['Codon_Frequency']:
+            densest[window['Window_Size']] = window
+    return {window_size: [window] for window_size, window in densest.items()}
+
+
+def _all_per_window_size(windows: Iterable[dict]) -> dict[int, list[dict]]:
+    """geneslider: keeps the densest window of every sequence per window size."""
+    by_window_size = defaultdict(list)
+    for window in windows:
+        by_window_size[window['Window_Size']].append(window)
+    return by_window_size
+
+
+def _run(collect, path_to_file, steps, codon_of_interest, initial_window_size, max_window_size, **retrieval):
+    if codon_of_interest is None or max_window_size is None:
+        raise TypeError("codon_of_interest and max_window_size are required.")
+    codon = _check_codon(codon_of_interest)
+    _check_positive('steps', steps)
+    _check_positive('initial_window_size', initial_window_size)
+    _check_positive('max_window_size', max_window_size)
+    if max_window_size < initial_window_size:
+        raise ValueError(f"max_window_size ({max_window_size}) is smaller than "
+                         f"initial_window_size ({initial_window_size}).")
+    window_sizes = range(initial_window_size, max_window_size + 1)
+
+    with input_file(path_to_file, **retrieval) as path_to_file:
+        logger.info("Searching %s for stretches of %s in windows of %d to %d codons",
+                    path_to_file, codon, initial_window_size, max_window_size)
+        by_window_size = collect(_scan(path_to_file, codon, steps, window_sizes))
+
+    rows, window_sizes_for_plot, max_codon_frequencies_for_plot = [], [], []
+    for window_size in window_sizes:
+        windows = by_window_size.get(window_size)
+        if not windows:
+            logger.info("Window size %d: no sequence is that long", window_size)
+            continue
+        # The last of the densest windows, as in maxslider
+        densest = max(reversed(windows), key=lambda window: window['Codon_Frequency'])
+        logger.info("Window size %d: highest frequency %.3f in %s", window_size, densest['Codon_Frequency'],
+                    densest['Gene'])
+        rows.extend(windows)
+        window_sizes_for_plot.append(window_size)
+        max_codon_frequencies_for_plot.append(densest['Codon_Frequency'])
+
+    return pd.DataFrame(rows, columns=COLUMNS), window_sizes_for_plot, max_codon_frequencies_for_plot
+
+
+def maxslider(path_to_file: str | None = None, steps: int = 1, codon_of_interest: str | None = None,
+              initial_window_size: int = 1, max_window_size: int | None = None, *, source: str | None = None,
+              species: str = 'human', genes: list[str] | None = None, assembly: str | None = None,
+              cache_dir: str | None = None, cache: bool = True) -> tuple[pd.DataFrame, list[int], list[float]]:
+    """
+    Finds, for each window size, the window with the highest frequency of the codon across all sequences.
 
     Args:
         path_to_file (str): Path to your own input CCDS FASTA file. Leave it out to
@@ -50,80 +177,20 @@ def maxslider(path_to_file=None, steps=1, codon_of_interest=None, initial_window
         cache (bool): Set to False to delete the downloaded sequences as soon as the analysis is finished.
 
     Returns:
-        tuple: A tuple containing (DataFrame of results, list of window sizes, list of max frequencies).
+        tuple: (DataFrame with one row per window size, list of window sizes, list of max frequencies).
+        Window sizes larger than every sequence are left out.
     """
-
-    if codon_of_interest is None or max_window_size is None:
-        raise TypeError("codon_of_interest and max_window_size are required.")
-    with input_file(path_to_file, source=source, species=species, genes=genes, assembly=assembly,
-                    cache_dir=cache_dir, cache=cache) as path_to_file:
-        return _maxslider(path_to_file, steps, codon_of_interest, initial_window_size, max_window_size)
+    return _run(_densest_per_window_size, path_to_file, steps, codon_of_interest, initial_window_size,
+                max_window_size, source=source, species=species, genes=genes, assembly=assembly,
+                cache_dir=cache_dir, cache=cache)
 
 
-def _maxslider(path_to_file, steps, codon_of_interest, initial_window_size, max_window_size):
-    # Initialize variables to keep track of the highest density information
-    all_results = []
-    current_window_size = initial_window_size
-    window_sizes_for_plot = []
-    max_codon_frequencies_for_plot = []
-
-    # storing the current time in the variable
-    date = datetime.now()
-    # Displays Time
-    current_time = date.strftime('%H:%M:%S')
-    print("Starting time:", date)
-    # Loop over different window sizes
-    while current_window_size <= max_window_size:
-        # NOTE: Opening the file inside the loop is necessary since SeqIO.parse
-        # consumes the generator. You must open/close on each iteration.
-        with open(path_to_file, mode='r') as handle:
-            max_codon_freq_across_records = 0
-            sequence_with_max_codon_freq_across_records = ''
-
-            for record in SeqIO.parse(handle, 'fasta'):
-                identifier = record.id
-                sequence = record.seq
-
-                # Skip records with sequences shorter than the current window size
-                if len(sequence) < current_window_size * 3:
-                    # print(f"Skipping record {identifier} with sequence length {len(sequence)}")
-                    continue
-
-                # Use the imported slidwin function
-                active_info = slidwin(str(sequence), current_window_size, steps, codon_of_interest,
-                                      max_window_size, identifier)
-
-                # Update the maximum codon frequency information across all records
-                if active_info['Codon_Frequency'] >= max_codon_freq_across_records:
-                    max_codon_freq_across_records = active_info['Codon_Frequency']
-                    sequence_with_max_codon_freq_across_records = active_info['Sequence']
-
-            # Append the maximum codon frequency across all records for the current window size
-            all_results.append({'Window_Size': current_window_size,
-                                'Codon_Frequency': max_codon_freq_across_records,
-                                'Sequence': sequence_with_max_codon_freq_across_records})
-
-            # Append data for plotting
-            window_sizes_for_plot.append(current_window_size)
-            max_codon_frequencies_for_plot.append(max_codon_freq_across_records)
-
-            print(
-                f"Highest codon frequency across all records for window size {current_window_size} / Frequency: {max_codon_freq_across_records} / Gene: {identifier} / finished at: {datetime.now().strftime('%H:%M:%S')}")
-
-        # Increase the window size by one codon
-        current_window_size += 1
-
-    final_result_df = pd.DataFrame(all_results)
-
-    # Return the results needed by the remaining script
-    return final_result_df, window_sizes_for_plot, max_codon_frequencies_for_plot
-
-
-def geneslider(path_to_file=None, steps=1, codon_of_interest=None, initial_window_size=1, max_window_size=None,
-               *, source=None, species='human', genes=None, assembly=None, cache_dir=None, cache=True):
+def geneslider(path_to_file: str | None = None, steps: int = 1, codon_of_interest: str | None = None,
+               initial_window_size: int = 1, max_window_size: int | None = None, *, source: str | None = None,
+               species: str = 'human', genes: list[str] | None = None, assembly: str | None = None,
+               cache_dir: str | None = None, cache: bool = True) -> tuple[pd.DataFrame, list[int], list[float]]:
     """
-    Reads a FASTA file, iterates through sequence records, and applies the
-    sliding_growing_window analysis for a range of window sizes.
+    Finds, for each window size, the window with the highest frequency of the codon in every sequence.
 
     Args:
         path_to_file (str): Path to your own input CCDS FASTA file. Leave it out to
@@ -141,77 +208,9 @@ def geneslider(path_to_file=None, steps=1, codon_of_interest=None, initial_windo
         cache (bool): Set to False to delete the downloaded sequences as soon as the analysis is finished.
 
     Returns:
-        tuple: A tuple containing (DataFrame of results, list of window sizes, list of max frequencies).
+        tuple: (DataFrame with one row per sequence and window size, list of window sizes,
+        list of max frequencies). Sequences shorter than the window are left out for that window size.
     """
-
-    if codon_of_interest is None or max_window_size is None:
-        raise TypeError("codon_of_interest and max_window_size are required.")
-    with input_file(path_to_file, source=source, species=species, genes=genes, assembly=assembly,
-                    cache_dir=cache_dir, cache=cache) as path_to_file:
-        return _geneslider(path_to_file, steps, codon_of_interest, initial_window_size, max_window_size)
-
-
-def _geneslider(path_to_file, steps, codon_of_interest, initial_window_size, max_window_size):
-    # Initialize variables to keep track of the highest density information
-    all_results = []
-    current_window_size = initial_window_size
-    window_sizes_for_plot = []
-    max_codon_frequencies_for_plot = []
-
-    # storing the current time in the variable
-    date = datetime.now()
-    # Displays Time
-    current_time = date.strftime('%H:%M:%S')
-    print("Starting time:", date)
-
-    # Loop over different window sizes
-    while current_window_size <= max_window_size:
-        # Variables for tracking highest frequency in the current window size iteration
-        frequencies_in_current_window = []
-
-        # NOTE: The file must be opened inside the loop because SeqIO.parse consumes the generator
-        with open(path_to_file, mode='r') as handle:
-            for record in SeqIO.parse(handle, 'fasta'):
-                identifier = record.id
-                sequence = str(record.seq)  # Ensure sequence is a string for slicing
-
-                # Skip sequences shorter than the current window size
-                if len(sequence) < current_window_size * 3:
-                    # print(f"Skipping protein {identifier} with sequence length {len(sequence)}")
-                    continue
-
-                # Apply the sliding window function
-                active_info = slidwin(sequence, current_window_size, steps, codon_of_interest,
-                                                     max_window_size, identifier)
-
-                # Add the gene symbol and gene ID, if the FASTA header names the gene
-                active_info['Gene_Symbol'], active_info['Gene_ID'] = gene_info(record.description)
-
-                # Append result for the current sequence/window size combination
-                all_results.append(active_info)
-
-                # Keep track of the frequencies just for the current window size iteration
-                frequencies_in_current_window.append(active_info['Codon_Frequency'])
-
-        # --- End of iteration for the current_window_size ---
-
-        # Update plotting lists with the highest frequency found in this window size
-        if frequencies_in_current_window:
-            max_freq_for_current_window = max(frequencies_in_current_window)
-            window_sizes_for_plot.append(current_window_size)
-            max_codon_frequencies_for_plot.append(max_freq_for_current_window)
-
-            # Print information for the current window size
-            print(
-                f"Highest codon frequency across all proteins for window size {current_window_size} / Frequency: {max_freq_for_current_window} / Gene: {identifier} / finished at: {datetime.now().strftime('%H:%M:%S')}")
-        else:
-            print(f"No records processed for window size {current_window_size}.")
-
-        # Increase the window size by one codon
-        current_window_size += 1
-
-    # Create the final DataFrame
-    final_result_df = pd.DataFrame(all_results)
-
-    # Return the results needed by the remaining script (for saving/plotting)
-    return final_result_df, window_sizes_for_plot, max_codon_frequencies_for_plot
+    return _run(_all_per_window_size, path_to_file, steps, codon_of_interest, initial_window_size,
+                max_window_size, source=source, species=species, genes=genes, assembly=assembly,
+                cache_dir=cache_dir, cache=cache)
