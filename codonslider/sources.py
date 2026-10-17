@@ -1,5 +1,9 @@
+"""Retrieval of coding sequences from NCBI and Ensembl."""
+from __future__ import annotations
+
 import gzip
 import json
+import logging
 import os
 import re
 import shutil
@@ -8,8 +12,11 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 NCBI_CCDS_URL = 'https://ftp.ncbi.nlm.nih.gov/pub/CCDS/{release}/CCDS_nucleotide.current.fna.gz'
 # Last CCDS release built on GRCh37 (GRCh37.p13, October 2013)
@@ -64,7 +71,7 @@ def _download_gz(url, destination, annotate=None):
     Downloads a gzipped FASTA file and stores it decompressed at destination.
     annotate is an optional function which returns the text to add to a header line.
     """
-    print(f"Downloading {url}")
+    logger.info("Downloading %s", url)
     # Write to a temporary file first, so an interrupted download never leaves a truncated FASTA in the cache
     partial = destination.with_name(destination.name + '.part')
     try:
@@ -79,7 +86,7 @@ def _download_gz(url, destination, annotate=None):
         os.replace(partial, destination)
     finally:
         partial.unlink(missing_ok=True)
-    print(f"Saved to {destination}")
+    logger.info("Saved to %s", destination)
 
 
 def _ccds_annotation(release):
@@ -98,7 +105,7 @@ def _ensembl_grch37_annotation():
     """The Ensembl GRCh37 FASTA headers hold the gene ID but not the symbol, which is looked up in BioMart."""
     symbols = {}
     # BioMart regularly answers with an error page or an incomplete table, so check its completion stamp and retry
-    for attempt in range(3):
+    for _attempt in range(3):
         try:
             with _open_url(ENSEMBL_GRCH37_SYMBOLS_URL) as response:
                 lines = response.read().decode().splitlines()
@@ -112,8 +119,9 @@ def _ensembl_grch37_annotation():
             break
         time.sleep(5)
     else:
-        print("Could not retrieve the gene symbols for Ensembl GRCh37 (Ensembl BioMart did not answer), so only the "
-              "gene IDs are included. Download again later with fetch_ccds(..., force=True) to add the symbols.")
+        logger.warning("Could not retrieve the gene symbols for Ensembl GRCh37 (Ensembl BioMart did not answer), so "
+                       "only the gene IDs are included. Download again later with fetch_ccds(..., force=True) to "
+                       "add the symbols.")
 
     def annotate(header):
         gene_id = re.search(r'\bgene:([^.\s]+)', header)
@@ -121,7 +129,7 @@ def _ensembl_grch37_annotation():
     return annotate
 
 
-def gene_info(description):
+def gene_info(description: str) -> tuple[str, str]:
     """
     Reads the gene symbol and gene ID from the header of a FASTA record. Understands the headers of
     Ensembl ('gene:ENSG00000141510.18 gene_symbol:TP53') and of NCBI RefSeq ('[gene=TP53] [db_xref=GeneID:7157]').
@@ -158,7 +166,8 @@ def _ensembl_post(endpoint, payload, assembly=None):
         return json.load(response)
 
 
-def fetch_ccds(source='ncbi', species='human', assembly=None, cache_dir=None, force=False):
+def fetch_ccds(source: str = 'ncbi', species: str = 'human', assembly: str | None = None,
+               cache_dir: str | os.PathLike | None = None, force: bool = False) -> str:
     """
     Downloads the coding sequences of a species and returns the path to the FASTA file.
     The file is kept in the cache directory and reused on the next call.
@@ -186,7 +195,7 @@ def fetch_ccds(source='ncbi', species='human', assembly=None, cache_dir=None, fo
             raise ValueError(f"NCBI CCDS is only available for human and mouse, not '{species}'. "
                              f"Use source='ensembl' for other species.")
         if assembly == 'T2T':
-            print("NCBI has no CCDS release for T2T-CHM13. Using the CDS of the NCBI RefSeq annotation instead.")
+            logger.info("NCBI has no CCDS release for T2T-CHM13. Using the CDS of the NCBI RefSeq annotation instead.")
             url = NCBI_T2T_URL
             destination = cache_dir / 'ncbi_human_T2T_RefSeq_cds.fasta'
         elif assembly == 'GRCh37':
@@ -234,7 +243,8 @@ def fetch_ccds(source='ncbi', species='human', assembly=None, cache_dir=None, fo
     return str(destination)
 
 
-def fetch_genes(genes, species='human', assembly=None, output_file=None, cache_dir=None):
+def fetch_genes(genes: str | list[str], species: str = 'human', assembly: str | None = None,
+                output_file: str | os.PathLike | None = None, cache_dir: str | os.PathLike | None = None) -> str:
     """
     Retrieves the CDS of the canonical transcript of the given genes through the
     Ensembl REST API and returns the path to a FASTA file containing them.
@@ -265,7 +275,8 @@ def fetch_genes(genes, species='human', assembly=None, output_file=None, cache_d
     found = _ensembl_post(f'/lookup/symbol/{ensembl_species}', {'symbols': genes}, assembly)
     remaining = [gene for gene in genes if gene not in found]
     if remaining:
-        found.update({gene: entry for gene, entry in _ensembl_post('/lookup/id', {'ids': remaining}, assembly).items() if entry})
+        by_id = _ensembl_post('/lookup/id', {'ids': remaining}, assembly)
+        found.update({gene: entry for gene, entry in by_id.items() if entry})
     for gene, entry in found.items():
         name = entry.get('display_name') or gene
         if entry.get('object_type') == 'Transcript':
@@ -285,7 +296,8 @@ def fetch_genes(genes, species='human', assembly=None, output_file=None, cache_d
     records = []
     for a in range(0, len(transcript_ids), REST_BATCH_SIZE):
         try:
-            records.extend(_ensembl_post('/sequence/id?type=cds', {'ids': transcript_ids[a:a + REST_BATCH_SIZE]}, assembly))
+            batch = transcript_ids[a:a + REST_BATCH_SIZE]
+            records.extend(_ensembl_post('/sequence/id?type=cds', {'ids': batch}, assembly))
         except FileNotFoundError:
             # Ensembl answers 404 when none of the transcripts in the batch has a CDS (non-coding genes)
             continue
@@ -293,7 +305,8 @@ def fetch_genes(genes, species='human', assembly=None, output_file=None, cache_d
         raise ValueError(f"None of the given genes has a coding sequence: {', '.join(genes)}")
     missing = set(transcript_ids) - {record['query'] for record in records}
     if missing:
-        print(f"Skipping genes without a coding sequence: {', '.join(transcripts[m][0] for m in sorted(missing))}")
+        logger.warning("Skipping genes without a coding sequence: %s",
+                       ', '.join(transcripts[m][0] for m in sorted(missing)))
 
     if output_file is None:
         cache_dir = Path(cache_dir) if cache_dir else DEFAULT_CACHE_DIR
@@ -307,7 +320,9 @@ def fetch_genes(genes, species='human', assembly=None, output_file=None, cache_d
     return str(output_file)
 
 
-def resolve_input(path_to_file=None, source=None, species='human', genes=None, assembly=None, cache_dir=None):
+def resolve_input(path_to_file: str | None = None, source: str | None = None, species: str = 'human',
+                  genes: list[str] | None = None, assembly: str | None = None,
+                  cache_dir: str | os.PathLike | None = None) -> str:
     """Returns the FASTA file to analyse: the user's own file, or one retrieved from NCBI/Ensembl."""
     if path_to_file is not None:
         if source is not None or genes is not None or assembly is not None:
@@ -323,7 +338,9 @@ def resolve_input(path_to_file=None, source=None, species='human', genes=None, a
 
 
 @contextmanager
-def input_file(path_to_file=None, source=None, species='human', genes=None, assembly=None, cache_dir=None, cache=True):
+def input_file(path_to_file: str | None = None, source: str | None = None, species: str = 'human',
+               genes: list[str] | None = None, assembly: str | None = None,
+               cache_dir: str | os.PathLike | None = None, cache: bool = True) -> Iterator[str]:
     """Provides the FASTA file to analyse. With cache=False, retrieved sequences are deleted afterwards."""
     if cache or path_to_file is not None:
         yield resolve_input(path_to_file, source=source, species=species, genes=genes, assembly=assembly,
@@ -334,4 +351,4 @@ def input_file(path_to_file=None, source=None, species='human', genes=None, asse
     # Download into a temporary directory, which is removed even if the analysis fails
     with tempfile.TemporaryDirectory(prefix='codonslider_') as temporary_dir:
         yield resolve_input(source=source, species=species, genes=genes, assembly=assembly, cache_dir=temporary_dir)
-    print("Deleted the downloaded sequences.")
+    logger.info("Deleted the downloaded sequences.")
