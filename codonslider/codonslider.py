@@ -47,7 +47,7 @@ def _codon_counts(sequence, codon):
 def _densest_window(sequence, counts, window_size, step):
     """
     Returns (frequency, window sequence) of the densest window, the last one if several are equally dense.
-    A sequence shorter than the window gives (0.0, '').
+    A sequence shorter than the window, or without the codon in any window, gives (0.0, '').
     """
     n_codons = len(counts) - 1
     if n_codons < window_size:
@@ -55,6 +55,9 @@ def _densest_window(sequence, counts, window_size, step):
     # Number of codons of interest in the windows starting at codon 0, step, 2 * step, ...
     per_window = counts[window_size::step] - counts[:n_codons - window_size + 1:step]
     best = len(per_window) - 1 - int(np.argmax(per_window[::-1]))
+    if per_window[best] == 0:
+        # Every window ties at 0, so no window is worth showing
+        return 0.0, ''
     start = best * step * 3
     return int(per_window[best]) / window_size, sequence[start:start + window_size * 3]
 
@@ -74,7 +77,8 @@ def slidwin(sequence: str, window_size: int, step: int, codon: str, identifier: 
     Returns:
         dict: Window_Size, Codon_Frequency (the fraction of the codons in the window that are the codon of
         interest), Sequence (the densest window, the last one if several are equally dense) and Gene (identifier).
-        A sequence shorter than the window has a frequency of 0 and an empty Sequence.
+        A sequence shorter than the window, or without the codon in any window, has a frequency of 0 and an
+        empty Sequence.
     """
     codon = _check_codon(codon)
     _check_positive('window_size', window_size)
@@ -103,12 +107,18 @@ def _scan(path_to_file, codon, step, window_sizes):
 
 
 def _densest_per_window_size(windows: Iterable[dict]) -> dict[int, list[dict]]:
-    """maxslider: keeps the densest window across all sequences per window size (the last one if tied)."""
-    densest = {}
+    """
+    maxslider: keeps the densest window across all sequences per window size (the last one if tied).
+    If no sequence has the codon in a window of that size, the gene is left empty too.
+    """
+    densest: dict[int, dict] = {}
     for window in windows:
         current = densest.get(window['Window_Size'])
         if current is None or window['Codon_Frequency'] >= current['Codon_Frequency']:
             densest[window['Window_Size']] = window
+    for window_size, window in densest.items():
+        if not window['Codon_Frequency']:
+            densest[window_size] = {**window, 'Gene': '', 'Gene_Symbol': '', 'Gene_ID': ''}
     return {window_size: [window] for window_size, window in densest.items()}
 
 
@@ -145,8 +155,11 @@ def _run(collect, path_to_file, steps, codon_of_interest, initial_window_size, m
             continue
         # The last of the densest windows, as in maxslider
         densest = max(reversed(windows), key=lambda window: window['Codon_Frequency'])
-        logger.info("Window size %d: highest frequency %.3f in %s", window_size, densest['Codon_Frequency'],
-                    densest['Gene'])
+        if densest['Codon_Frequency']:
+            logger.info("Window size %d: highest frequency %.3f in %s", window_size, densest['Codon_Frequency'],
+                        densest['Gene'])
+        else:
+            logger.info("Window size %d: no window contains %s", window_size, codon)
         rows.extend(windows)
         window_sizes_for_plot.append(window_size)
         max_codon_frequencies_for_plot.append(densest['Codon_Frequency'])

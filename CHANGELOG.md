@@ -9,6 +9,9 @@
 - The progress messages named the last gene in the file instead of the gene with the densest window.
 - maxslider crashed on an empty FASTA file. It now returns an empty table.
 - The codon was not matched in lower case sequences, and a lower case codon (`'aga'`) matched nothing.
+- A sequence without the codon in any window was reported with the last window as its `Sequence` (often the stop
+  codon, e.g. `TAA` for ISG15 when searching for AGA). `Sequence` is now empty when the frequency is 0, and in
+  maxslider so are the gene columns, since no gene has the codon in a window of that size.
 
 ### Changed
 

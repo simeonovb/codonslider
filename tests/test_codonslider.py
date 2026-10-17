@@ -31,13 +31,16 @@ class TestSlidwin:
         assert result['Codon_Frequency'] == pytest.approx(2 / 3)
 
     def test_codon_absent(self):
-        result = slidwin('ATGCCCGGGTTT', 2, 1, 'AGA')
+        # Every window ties at 0; the last one (here the stop codon) must not be shown as a stretch
+        result = slidwin('ATGCCCGGGTAA', 1, 1, 'AGA')
         assert result['Codon_Frequency'] == 0
+        assert result['Sequence'] == ''
 
     def test_only_counts_in_frame(self):
         # 'AGA' appears out of frame (positions 1-3) but never as a codon
         result = slidwin('CAGATTCCC', 1, 1, 'AGA')
         assert result['Codon_Frequency'] == 0
+        assert result['Sequence'] == ''
 
     def test_step_skips_windows(self):
         # With a step of 2 codons the window AGAAGA (offset 1 codon) is never visited
@@ -133,6 +136,14 @@ class TestMaxslider:
         assert df['Codon_Frequency'].tolist() == [pytest.approx(2 / 3)]
         assert df['Sequence'].tolist() == ['AGACCCAGA']
 
+    def test_no_gene_has_codon(self, tmp_path, caplog):
+        path = write_fasta(tmp_path, '>a gene_symbol:A\nATGCCCTAA\n>b gene_symbol:B\nATGGGGTAA\n')
+        with caplog.at_level(logging.INFO):
+            df, _, frequencies = maxslider(path_to_file=path, codon_of_interest='AGA', max_window_size=2)
+        assert frequencies == [0, 0]
+        assert df[['Sequence', 'Gene', 'Gene_Symbol', 'Gene_ID']].values.tolist() == [['', '', '', '']] * 2
+        assert 'Window size 1: no window contains AGA' in caplog.text
+
     def test_empty_file(self, tmp_path):
         path = write_fasta(tmp_path, '')
         df, window_sizes, frequencies = maxslider(path_to_file=path, codon_of_interest='AGA', max_window_size=3)
@@ -192,6 +203,15 @@ class TestGeneslider:
         path = write_fasta(tmp_path, '>a\nAGAAGA\n')
         df, _, _ = geneslider(path_to_file=path, codon_of_interest='AGA', initial_window_size=2, max_window_size=2)
         assert df.loc[0, ['Codon_Frequency', 'Gene']].tolist() == [1.0, 'a']
+
+    def test_gene_without_codon(self, tmp_path):
+        # The gene keeps its row and name, but has no window to show
+        path = write_fasta(tmp_path, '>with gene_symbol:W\nAGAATGTAA\n>without gene_symbol:WO\nATGCCCTAA\n')
+        df, _, frequencies = geneslider(path_to_file=path, codon_of_interest='AGA', max_window_size=1)
+        rows = df.set_index('Gene')
+        assert rows.loc['with', ['Codon_Frequency', 'Sequence']].tolist() == [1.0, 'AGA']
+        assert rows.loc['without', ['Codon_Frequency', 'Sequence', 'Gene_Symbol']].tolist() == [0, '', 'WO']
+        assert frequencies == [1.0]
 
     def test_window_longer_than_every_gene(self, fasta, caplog):
         with caplog.at_level(logging.INFO):

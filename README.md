@@ -237,6 +237,8 @@ progress by default (`--quiet` hides it).
 - The window starts at the first codon and moves `steps` codons at a time. The frequency of a window is the number
   of codons of interest divided by the window size.
 - If several windows are equally dense, the last one is reported (in maxslider: the last one in the file).
+- If no window contains the codon, the frequency is 0 and `Sequence` is empty. In maxslider the gene columns are
+  empty too.
 - A sequence shorter than the window is left out for that window size. A window size longer than every sequence is
   left out of the results.
 - Each sequence is read once and turned into a cumulative count of the codon, so the number of codons of interest
