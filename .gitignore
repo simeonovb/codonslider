@@ -1,5 +1,17 @@
 __pycache__/
+*.py[cod]
 *.egg-info/
 build/
 dist/
 *.fasta
+
+# Environments and editors
+.venv/
+.idea/
+.vscode/
+
+# Test and lint caches
+.pytest_cache/
+.ruff_cache/
+.coverage
+coverage.xml
