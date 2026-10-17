@@ -92,23 +92,21 @@ class TestMaxslider:
     def test_results(self, fasta):
         df, window_sizes, frequencies = maxslider(path_to_file=fasta, codon_of_interest='AGA',
                                                   initial_window_size=1, max_window_size=3)
-        assert list(df.columns) == ['Window_Size', 'Codon_Frequency', 'Sequence', 'Gene', 'Gene_Symbol', 'Gene_ID']
+        # No gene columns: the densest windows are often in many genes at once, and geneslider lists them
+        assert list(df.columns) == ['Window_Size', 'Codon_Frequency', 'Sequence']
         assert df['Window_Size'].tolist() == [1, 2, 3]
         assert df['Codon_Frequency'].tolist() == [1.0, 1.0, 1.0]
         assert df['Sequence'].tolist() == ['AGA', 'AGAAGA', 'AGAAGAAGA']
         assert window_sizes == [1, 2, 3]
         assert frequencies == [1.0, 1.0, 1.0]
 
-    def test_reports_gene_of_densest_window(self, fasta):
-        df, _, _ = maxslider(path_to_file=fasta, codon_of_interest='AGA', initial_window_size=3, max_window_size=3)
-        assert df.loc[0, ['Gene', 'Gene_Symbol', 'Gene_ID']].tolist() == ['g2', 'FOO', 'ENSG00000000002.3']
-
-    def test_logs_gene_of_densest_window(self, tmp_path, caplog):
-        # The densest gene comes first, so the message must not name the last gene read
+    def test_logs_highest_frequency(self, tmp_path, caplog):
+        # The densest gene comes first, so the message must report its frequency, not the last gene's
         path = write_fasta(tmp_path, '>dense\nAGAAGA\n>sparse\nATGATG\n')
         with caplog.at_level(logging.INFO):
             maxslider(path_to_file=path, codon_of_interest='AGA', initial_window_size=2, max_window_size=2)
-        assert 'Window size 2: highest frequency 1.000 in dense' in caplog.text
+        assert 'Window size 2: highest frequency 1.000' in caplog.text
+        assert 'dense' not in caplog.text.replace(path, '')
 
     def test_initial_window_size(self, fasta):
         df, window_sizes, _ = maxslider(path_to_file=fasta, codon_of_interest='AGA',
@@ -119,7 +117,7 @@ class TestMaxslider:
     def test_window_as_long_as_gene(self, tmp_path):
         path = write_fasta(tmp_path, '>a\nAGAAGA\n')
         df, _, _ = maxslider(path_to_file=path, codon_of_interest='AGA', initial_window_size=2, max_window_size=2)
-        assert df.loc[0, ['Codon_Frequency', 'Sequence', 'Gene']].tolist() == [1.0, 'AGAAGA', 'a']
+        assert df.loc[0, ['Codon_Frequency', 'Sequence']].tolist() == [1.0, 'AGAAGA']
 
     def test_window_sizes_longer_than_every_gene_are_left_out(self, fasta):
         df, window_sizes, frequencies = maxslider(path_to_file=fasta, codon_of_interest='AGA',
@@ -141,14 +139,14 @@ class TestMaxslider:
         with caplog.at_level(logging.INFO):
             df, _, frequencies = maxslider(path_to_file=path, codon_of_interest='AGA', max_window_size=2)
         assert frequencies == [0, 0]
-        assert df[['Sequence', 'Gene', 'Gene_Symbol', 'Gene_ID']].values.tolist() == [['', '', '', '']] * 2
+        assert df['Sequence'].tolist() == ['', '']
         assert 'Window size 1: no window contains AGA' in caplog.text
 
     def test_empty_file(self, tmp_path):
         path = write_fasta(tmp_path, '')
         df, window_sizes, frequencies = maxslider(path_to_file=path, codon_of_interest='AGA', max_window_size=3)
         assert df.empty
-        assert list(df.columns) == ['Window_Size', 'Codon_Frequency', 'Sequence', 'Gene', 'Gene_Symbol', 'Gene_ID']
+        assert list(df.columns) == ['Window_Size', 'Codon_Frequency', 'Sequence']
         assert window_sizes == frequencies == []
 
     def test_requires_codon_and_max_window(self, fasta):

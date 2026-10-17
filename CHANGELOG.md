@@ -6,19 +6,18 @@
 
 - A sequence exactly as long as the window was given a codon frequency of 0. It is now analysed like any other
   sequence (with geneslider, its row also lacked the gene name).
-- The progress messages named the last gene in the file instead of the gene with the densest window.
+- The progress messages named the last gene in the file as if it held the densest window. They now report the
+  highest frequency without a gene.
 - maxslider crashed on an empty FASTA file. It now returns an empty table.
 - The codon was not matched in lower case sequences, and a lower case codon (`'aga'`) matched nothing.
 - A sequence without the codon in any window was reported with the last window as its `Sequence` (often the stop
-  codon, e.g. `TAA` for ISG15 when searching for AGA). `Sequence` is now empty when the frequency is 0, and in
-  maxslider so are the gene columns, since no gene has the codon in a window of that size.
+  codon, e.g. `TAA` for ISG15 when searching for AGA). `Sequence` is now empty when the frequency is 0.
 
 ### Changed
 
 - maxslider and geneslider are about 60 to 200 times faster: the FASTA file is read once instead of once per window
   size, and the codons in a window are counted from a cumulative count instead of one by one. The results are the
   same as before, apart from the fixes above.
-- maxslider also reports the gene with the densest window: new columns `Gene`, `Gene_Symbol` and `Gene_ID`.
 - maxslider leaves out window sizes longer than every sequence, as geneslider does, instead of reporting them with a
   frequency of 0 and an empty sequence.
 - Progress and download messages go through the `logging` module instead of `print`, so they can be turned off or
