@@ -49,8 +49,8 @@ final_result_df, window_sizes_for_plot, max_codon_frequencies_for_plot = maxslid
 
 codonslider has two functions. They take the same arguments and differ in what they report:
 
-- `maxslider` reports, for each window size, the single window with the highest frequency of the codon across all
-  sequences, and the gene it is in. Use it to see how long the densest stretch in the transcriptome is.
+- `maxslider` reports, for each window size, the highest frequency of the codon in any window across all
+  sequences. Use it to see how long the densest stretch in the transcriptome is.
 - `geneslider` reports, for each window size, the best window of every gene.
   Use it to find out which genes carry the stretches.
 
@@ -83,15 +83,18 @@ plt.savefig("codon_stretches.png")
 plt.show()
 ```
 
-The dataframe has one row per window size, with the gene that contains the densest window. For three genes
-(TP53, BRCA2 and MYC) it looks like this:
+The dataframe has one row per window size. For three genes (TP53, BRCA2 and MYC) it looks like this:
 
 ```
-   Window_Size  Codon_Frequency   Sequence                   Gene Gene_Symbol          Gene_ID
-0            1         1.000000        AGA    MYC|ENST00000621592         MYC  ENSG00000136997
-1            2         1.000000     AGAAGA  BRCA2|ENST00000380152       BRCA2  ENSG00000139618
-2            3         0.666667  AGAAGAGCC  BRCA2|ENST00000380152       BRCA2  ENSG00000139618
+   Window_Size  Codon_Frequency   Sequence
+0            1         1.000000        AGA
+1            2         1.000000     AGAAGA
+2            3         0.666667  AGAAGAGCC
 ```
+
+It does not name a gene: the highest frequency is often reached in many genes at once (for AGA in the human CCDS,
+31,855 genes reach 1.0 in a window of 1 codon), and `Sequence` shows one of those windows. Use `geneslider` to see
+which genes reach it.
 
 ### geneslider: the best stretch of every gene
 
@@ -210,9 +213,9 @@ max_window_size = the final size of the growing sliding window in codons
 Returns:
 
 ```
-final_result_df = a dataframe with the window size (in codons), the highest codon frequency, the sequence of that
-                  window and the gene it is in (name in the FASTA file, gene symbol and gene ID).
-                  maxslider: one row per window size. geneslider: one row per gene and window size
+final_result_df = a dataframe with the window size (in codons), the highest codon frequency and the sequence of
+                  that window. maxslider: one row per window size. geneslider: one row per gene and window size,
+                  with the gene (name in the FASTA file, gene symbol and gene ID)
 window_sizes_for_plot = the window sizes, in codons
 max_codon_frequencies_for_plot = the highest codon frequency recorded for each window size (across all genes)
 ```
@@ -237,6 +240,7 @@ progress by default (`--quiet` hides it).
 - The window starts at the first codon and moves `steps` codons at a time. The frequency of a window is the number
   of codons of interest divided by the window size.
 - If several windows are equally dense, the last one is reported (in maxslider: the last one in the file).
+- If no window contains the codon, the frequency is 0 and `Sequence` is empty.
 - A sequence shorter than the window is left out for that window size. A window size longer than every sequence is
   left out of the results.
 - Each sequence is read once and turned into a cumulative count of the codon, so the number of codons of interest
